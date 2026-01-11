@@ -85,6 +85,7 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 				prefix = trimmed
 			}
 		}
+		disabled := metadataDisabled(metadata)
 
 		a := &coreauth.Auth{
 			ID:       id,
@@ -100,6 +101,10 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 			Metadata:  metadata,
 			CreatedAt: now,
 			UpdatedAt: now,
+		}
+		if disabled {
+			a.Disabled = true
+			a.Status = coreauth.StatusDisabled
 		}
 		ApplyAuthExcludedModelsMeta(a, cfg, nil, "oauth")
 		if provider == "gemini-cli" {
@@ -127,6 +132,7 @@ func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 	if len(projects) <= 1 {
 		return nil
 	}
+	disabled := metadataDisabled(metadata)
 	email, _ := metadata["email"].(string)
 	shared := geminicli.NewSharedCredential(primary.ID, email, metadata, projects)
 	primary.Disabled = true
@@ -184,6 +190,10 @@ func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 			UpdatedAt:  primary.UpdatedAt,
 			Runtime:    geminicli.NewVirtualCredential(projectID, shared),
 		}
+		if disabled {
+			virtual.Disabled = true
+			virtual.Status = coreauth.StatusDisabled
+		}
 		virtuals = append(virtuals, virtual)
 	}
 	return virtuals
@@ -221,4 +231,29 @@ func buildGeminiVirtualID(baseID, projectID string) string {
 	}
 	replacer := strings.NewReplacer("/", "_", "\\", "_", " ", "_")
 	return fmt.Sprintf("%s::%s", baseID, replacer.Replace(project))
+}
+
+func metadataDisabled(metadata map[string]any) bool {
+	if metadata == nil {
+		return false
+	}
+	if raw, ok := metadata["disabled"]; ok {
+		switch v := raw.(type) {
+		case bool:
+			return v
+		case string:
+			return strings.EqualFold(strings.TrimSpace(v), "true") || strings.TrimSpace(v) == "1"
+		case float64:
+			return v != 0
+		case int:
+			return v != 0
+		case int64:
+			return v != 0
+		case json.Number:
+			if n, err := v.Int64(); err == nil {
+				return n != 0
+			}
+		}
+	}
+	return false
 }

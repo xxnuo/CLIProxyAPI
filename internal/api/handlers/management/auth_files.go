@@ -348,8 +348,10 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 			if data, errRead := os.ReadFile(full); errRead == nil {
 				typeValue := gjson.GetBytes(data, "type").String()
 				emailValue := gjson.GetBytes(data, "email").String()
+				disabledValue := gjson.GetBytes(data, "disabled").Bool()
 				fileData["type"] = typeValue
 				fileData["email"] = emailValue
+				fileData["disabled"] = disabledValue
 			}
 
 			files = append(files, fileData)
@@ -710,6 +712,7 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 		label = email
 	}
 	lastRefresh, hasLastRefresh := extractLastRefreshTimestamp(metadata)
+	disabled := metadataDisabled(metadata)
 
 	authID := h.authIDForPath(path)
 	if authID == "" {
@@ -729,6 +732,10 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 		Metadata:   metadata,
 		CreatedAt:  time.Now(),
 		UpdatedAt:  time.Now(),
+	}
+	if disabled {
+		auth.Disabled = true
+		auth.Status = coreauth.StatusDisabled
 	}
 	if hasLastRefresh {
 		auth.LastRefreshedAt = lastRefresh
@@ -765,6 +772,91 @@ func (h *Handler) disableAuth(ctx context.Context, id string) {
 		auth.UpdatedAt = time.Now()
 		_, _ = h.authManager.Update(ctx, auth)
 	}
+}
+
+func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
+	if h == nil || h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+	var req struct {
+		Name     string `json:"name"`
+		Disabled *bool  `json:"disabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": "invalid request body"})
+		return
+	}
+	if req.Disabled == nil {
+		c.JSON(400, gin.H{"error": "disabled is required"})
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
+		c.JSON(400, gin.H{"error": "invalid name"})
+		return
+	}
+	if !strings.HasSuffix(strings.ToLower(name), ".json") {
+		c.JSON(400, gin.H{"error": "name must end with .json"})
+		return
+	}
+	full := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
+	if !filepath.IsAbs(full) {
+		if abs, errAbs := filepath.Abs(full); errAbs == nil {
+			full = abs
+		}
+	}
+	data, err := os.ReadFile(full)
+	if err != nil {
+		if os.IsNotExist(err) {
+			c.JSON(404, gin.H{"error": "file not found"})
+		} else {
+			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read file: %v", err)})
+		}
+		return
+	}
+	metadata := make(map[string]any)
+	if err = json.Unmarshal(data, &metadata); err != nil {
+		c.JSON(400, gin.H{"error": "invalid auth file"})
+		return
+	}
+	metadata["disabled"] = *req.Disabled
+	updated, err := json.Marshal(metadata)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "failed to encode auth file"})
+		return
+	}
+	if err = os.WriteFile(full, updated, 0o600); err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to write file: %v", err)})
+		return
+	}
+	_ = h.registerAuthFromFile(c.Request.Context(), full, updated)
+	c.JSON(200, gin.H{"status": "ok", "disabled": *req.Disabled})
+}
+
+func metadataDisabled(metadata map[string]any) bool {
+	if metadata == nil {
+		return false
+	}
+	if raw, ok := metadata["disabled"]; ok {
+		switch v := raw.(type) {
+		case bool:
+			return v
+		case string:
+			return strings.EqualFold(strings.TrimSpace(v), "true") || strings.TrimSpace(v) == "1"
+		case float64:
+			return v != 0
+		case int:
+			return v != 0
+		case int64:
+			return v != 0
+		case json.Number:
+			if n, err := v.Int64(); err == nil {
+				return n != 0
+			}
+		}
+	}
+	return false
 }
 
 func (h *Handler) deleteTokenRecord(ctx context.Context, path string) error {
