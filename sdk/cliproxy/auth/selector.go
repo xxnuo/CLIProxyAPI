@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -187,7 +188,7 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if auth == nil {
 		return true, blockReasonOther, time.Time{}
 	}
-	if auth.Disabled || auth.Status == StatusDisabled {
+	if auth.Disabled || auth.Status == StatusDisabled || metadataDisabled(auth.Metadata) {
 		return true, blockReasonDisabled, time.Time{}
 	}
 	if model != "" {
@@ -233,4 +234,29 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 		return true, blockReasonOther, next
 	}
 	return false, blockReasonNone, time.Time{}
+}
+
+func metadataDisabled(metadata map[string]any) bool {
+	if metadata == nil {
+		return false
+	}
+	if raw, ok := metadata["disabled"]; ok {
+		switch v := raw.(type) {
+		case bool:
+			return v
+		case string:
+			return strings.EqualFold(strings.TrimSpace(v), "true") || strings.TrimSpace(v) == "1"
+		case float64:
+			return v != 0
+		case int:
+			return v != 0
+		case int64:
+			return v != 0
+		case json.Number:
+			if n, err := v.Int64(); err == nil {
+				return n != 0
+			}
+		}
+	}
+	return false
 }

@@ -831,6 +831,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		return
 	}
 	_ = h.registerAuthFromFile(c.Request.Context(), full, updated)
+	h.updateAuthStatusByPath(c.Request.Context(), full, *req.Disabled)
 	c.JSON(200, gin.H{"status": "ok", "disabled": *req.Disabled})
 }
 
@@ -857,6 +858,45 @@ func metadataDisabled(metadata map[string]any) bool {
 		}
 	}
 	return false
+}
+
+func (h *Handler) updateAuthStatusByPath(ctx context.Context, path string, disabled bool) {
+	if h == nil || h.authManager == nil {
+		return
+	}
+	base := strings.TrimSpace(path)
+	fileName := filepath.Base(base)
+	auths := h.authManager.List()
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		match := false
+		if auth.ID == base || auth.ID == fileName {
+			match = true
+		} else if auth.FileName == fileName && fileName != "" {
+			match = true
+		} else if auth.Attributes != nil {
+			if p := strings.TrimSpace(auth.Attributes["path"]); p != "" && (p == base || filepath.Base(p) == fileName) {
+				match = true
+			}
+			if s := strings.TrimSpace(auth.Attributes["source"]); s != "" && (s == base || filepath.Base(s) == fileName) {
+				match = true
+			}
+		}
+		if !match {
+			continue
+		}
+		auth.Disabled = disabled
+		if disabled {
+			auth.Status = coreauth.StatusDisabled
+			registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		} else if auth.Status == coreauth.StatusDisabled {
+			auth.Status = coreauth.StatusActive
+		}
+		auth.UpdatedAt = time.Now()
+		_, _ = h.authManager.Update(ctx, auth)
+	}
 }
 
 func (h *Handler) deleteTokenRecord(ctx context.Context, path string) error {
