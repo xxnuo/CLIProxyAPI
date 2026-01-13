@@ -2292,3 +2292,143 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "wait"})
 }
+
+func (h *Handler) SetAuthFileDisabled(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+	ctx := c.Request.Context()
+
+	var body struct {
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Disabled *bool  `json:"disabled"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	if body.Disabled == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "disabled field is required"})
+		return
+	}
+
+	authID := strings.TrimSpace(body.ID)
+	if authID == "" {
+		authID = strings.TrimSpace(body.Name)
+	}
+	if authID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id or name is required"})
+		return
+	}
+
+	auth, ok := h.authManager.GetByID(authID)
+	if !ok {
+		auths := h.authManager.List()
+		for _, a := range auths {
+			if a.FileName == authID || a.FileName == body.Name {
+				auth = a
+				ok = true
+				break
+			}
+		}
+	}
+	if !ok || auth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found"})
+		return
+	}
+
+	fileKey := auth.FileName
+	if fileKey == "" {
+		fileKey = auth.ID
+	}
+
+	h.updateDisabledAuthFiles(fileKey, *body.Disabled)
+	if !h.persist(c) {
+		return
+	}
+
+	auth.Disabled = *body.Disabled
+	if *body.Disabled {
+		auth.Status = coreauth.StatusDisabled
+		auth.StatusMessage = "disabled via management API"
+	} else {
+		auth.Status = coreauth.StatusActive
+		auth.StatusMessage = ""
+	}
+	auth.UpdatedAt = time.Now()
+
+	if _, err := h.authManager.Update(ctx, auth); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+		return
+	}
+
+	if *body.Disabled {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		if auth.Attributes != nil {
+			if children := strings.TrimSpace(auth.Attributes["virtual_children"]); children != "" {
+				for _, projectID := range strings.Split(children, ",") {
+					virtualID := fmt.Sprintf("%s::%s", auth.ID, strings.TrimSpace(projectID))
+					registry.GetGlobalRegistry().UnregisterClient(virtualID)
+					if virtualAuth, ok := h.authManager.GetByID(virtualID); ok && virtualAuth != nil {
+						virtualAuth.Disabled = true
+						virtualAuth.Status = coreauth.StatusDisabled
+						virtualAuth.StatusMessage = "parent disabled via management API"
+						virtualAuth.UpdatedAt = time.Now()
+						_, _ = h.authManager.Update(ctx, virtualAuth)
+					}
+				}
+			}
+		}
+	} else {
+		if h.onAuthEnabled != nil {
+			h.onAuthEnabled(auth)
+		}
+		if auth.Attributes != nil {
+			if children := strings.TrimSpace(auth.Attributes["virtual_children"]); children != "" {
+				for _, projectID := range strings.Split(children, ",") {
+					virtualID := fmt.Sprintf("%s::%s", auth.ID, strings.TrimSpace(projectID))
+					if virtualAuth, ok := h.authManager.GetByID(virtualID); ok && virtualAuth != nil {
+						virtualAuth.Disabled = false
+						virtualAuth.Status = coreauth.StatusActive
+						virtualAuth.StatusMessage = ""
+						virtualAuth.UpdatedAt = time.Now()
+						_, _ = h.authManager.Update(ctx, virtualAuth)
+						if h.onAuthEnabled != nil {
+							h.onAuthEnabled(virtualAuth)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": auth.Disabled})
+}
+
+func (h *Handler) updateDisabledAuthFiles(fileKey string, disabled bool) {
+	if h.cfg == nil || fileKey == "" {
+		return
+	}
+	fileKey = strings.TrimSpace(fileKey)
+	existing := make(map[string]struct{}, len(h.cfg.DisabledAuthFiles))
+	for _, f := range h.cfg.DisabledAuthFiles {
+		existing[strings.TrimSpace(f)] = struct{}{}
+	}
+	if disabled {
+		if _, ok := existing[fileKey]; !ok {
+			h.cfg.DisabledAuthFiles = append(h.cfg.DisabledAuthFiles, fileKey)
+		}
+	} else {
+		if _, ok := existing[fileKey]; ok {
+			newList := make([]string, 0, len(h.cfg.DisabledAuthFiles))
+			for _, f := range h.cfg.DisabledAuthFiles {
+				if strings.TrimSpace(f) != fileKey {
+					newList = append(newList, f)
+				}
+			}
+			h.cfg.DisabledAuthFiles = newList
+		}
+	}
+}

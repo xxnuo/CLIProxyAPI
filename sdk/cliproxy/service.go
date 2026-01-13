@@ -463,6 +463,15 @@ func (s *Service) Run(ctx context.Context) error {
 		s.authManager = newDefaultAuthManager()
 	}
 
+	if s.server != nil {
+		s.server.SetAuthEnableCallback(func(auth *coreauth.Auth) {
+			if auth == nil {
+				return
+			}
+			s.registerModelsForAuth(auth)
+		})
+	}
+
 	s.ensureWebsocketGateway()
 	if s.server != nil && s.wsGateway != nil {
 		s.server.AttachWebsocketRoute(s.wsGateway.Path(), s.wsGateway.Handler())
@@ -678,6 +687,10 @@ func (s *Service) ensureAuthDir() error {
 // registerModelsForAuth (re)binds provider models in the global registry using the core auth ID as client identifier.
 func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	if a == nil || a.ID == "" {
+		return
+	}
+	if a.Disabled {
+		GlobalModelRegistry().UnregisterClient(a.ID)
 		return
 	}
 	authKind := strings.ToLower(strings.TrimSpace(a.Attributes["auth_kind"]))
